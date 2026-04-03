@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+# src 布局：package-dir + packages.find 指明源码位置；egg-info 目录须靠仓库根目录的 setup.cfg [egg_info] egg_base = .
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[project]
+name = "knowlix"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+  "openai>=1.0",
+  "pytest>=7.0",
+  "python-dotenv>=1.0"
+]
+
+[project.scripts]
+knowlix = "knowlix.cli:main"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
