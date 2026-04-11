@@ -31,9 +31,12 @@ class Settings(BaseSettings):
     """
 
     PG_DATABASE_URL: str = ""
+    PG_DATABASE_USER_NAME: str = ""
+    PG_DATABASE_USER_PASSWORD: str = ""
     LLM_API_KEY: str = ""
     ENV: str = "dev"
-    DEBUG: bool = True
+    DEBUG: bool = False,
+    RUN_DB_TESTS: int = 0,
 
     model_config = SettingsConfigDict(
         env_file_encoding="utf-8",
