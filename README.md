@@ -5,3 +5,7 @@
  - 默认dev环境
  - 在`.env`设置`ENV=dev`/`ENV=prod`，或者通过系统环境变量设置开启不同环境
  - `.env`为公共配置文件，`.env.**`环境专属配置文件
+
+# 数据库集成测试
+ - 本机启动 PostgreSQL，`.env` / `.env.<环境>` 中配置 `PG_DATABASE_URL`（可用 `postgresql://...`，会自动改用 `postgresql+psycopg`）
+ - 仅跑持久化烟测：`RUN_DB_TESTS=1 pytest tests/integration -q`
