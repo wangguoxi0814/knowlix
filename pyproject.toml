@@ -15,10 +15,12 @@ version = "0.1.0"
 requires-python = ">=3.10"
 dependencies = [
   "openai>=1.0",
+  "psycopg[binary]>=3.1",
   "pydantic>=2.0",
   "pydantic-settings>=2.0",
   "pytest>=7.0",
-  "python-dotenv>=1.0"
+  "python-dotenv>=1.0",
+  "sqlalchemy>=2.0"
 ]
 
 [project.scripts]
