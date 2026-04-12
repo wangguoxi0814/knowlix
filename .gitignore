@@ -209,3 +209,7 @@ __marimo__/
 # .env files
 .env
 .env.*
+
+# .idea files
+.idea
+.idea/*
