@@ -31,8 +31,6 @@ class Settings(BaseSettings):
     """
 
     PG_DATABASE_URL: str = ""
-    PG_DATABASE_USER_NAME: str = ""
-    PG_DATABASE_USER_PASSWORD: str = ""
     LLM_API_KEY: str = ""
     ENV: str = "dev"
     DEBUG: bool = False,
