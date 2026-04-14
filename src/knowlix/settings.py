@@ -33,8 +33,8 @@ class Settings(BaseSettings):
     PG_DATABASE_URL: str = ""
     LLM_API_KEY: str = ""
     ENV: str = "dev"
-    DEBUG: bool = False,
-    RUN_DB_TESTS: int = 0,
+    DEBUG: bool = False
+    RUN_DB_TESTS: int = 0
 
     model_config = SettingsConfigDict(
         env_file_encoding="utf-8",
