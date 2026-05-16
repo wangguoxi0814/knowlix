@@ -31,10 +31,14 @@ class Settings(BaseSettings):
     """
 
     PG_DATABASE_URL: str = ""
+    NEO4J_URI: str = ""
+    NEO4J_USER: str = ""
+    NEO4J_PASSWORD: str = ""
     LLM_API_KEY: str = ""
     ENV: str = "dev"
     DEBUG: bool = False
     RUN_DB_TESTS: int = 0
+    RUN_NEO4J_TESTS: int = 0
 
     model_config = SettingsConfigDict(
         env_file_encoding="utf-8",
