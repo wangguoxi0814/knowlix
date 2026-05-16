@@ -1,0 +1,27 @@
+# 本地开发：PostgreSQL（事务/掌握等）+ Neo4j（词汇知识图谱）
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: knowlix
+      POSTGRES_PASSWORD: knowlix
+      POSTGRES_DB: knowlix_dev
+    ports:
+      - "5432:5432"
+    volumes:
+      - knowlix_pg_data:/var/lib/postgresql/data
+
+  neo4j:
+    image: neo4j:5-community
+    environment:
+      NEO4J_AUTH: neo4j/knowlix_dev
+      NEO4J_PLUGINS: '["apoc"]'
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - knowlix_neo4j_data:/data
+
+volumes:
+  knowlix_pg_data:
+  knowlix_neo4j_data:

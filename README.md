@@ -7,9 +7,22 @@
  - 在`.env`设置`ENV=dev`/`ENV=prod`，或者通过系统环境变量设置开启不同环境
 
 
-# 数据库集成测试
- - 本机启动 PostgreSQL，`.env` / `.env.<环境>` 中配置 `PG_DATABASE_URL`（可用 `postgresql://...`，会自动改用 `postgresql+psycopg`）
- - 仅跑持久化烟测：`RUN_DB_TESTS=1 pytest tests/integration -q`
+# 数据库
+
+## PostgreSQL（掌握、审计、向量等）
+
+ - 本机或 `docker compose up postgres`，在 `.env` / `.env.<环境>` 配置 `PG_DATABASE_URL`（`postgresql://...` 会自动改用 `postgresql+psycopg`）
+ - 集成测试：`RUN_DB_TESTS=1 pytest tests/integration/test_persistence_smoke.py tests/integration/test_alembic_schema.py -q`
+
+## Neo4j（词汇知识图谱）
+
+ - 本机或 `docker compose up neo4j`（默认 `bolt://localhost:7687`，用户 `neo4j`，密码见 `docker-compose.yml`）
+ - 环境变量示例：
+   - `NEO4J_URI=bolt://localhost:7687`
+   - `NEO4J_USER=neo4j`
+   - `NEO4J_PASSWORD=knowlix_dev`
+ - 集成测试：`RUN_NEO4J_TESTS=1 pytest tests/integration/test_neo4j_lexicon.py -q`
+ - 实现：`LexiconGraphPort` → `Neo4jLexiconGraphRepository`（`src/knowlix/infrastructure/graph/neo4j/`）
 
 # 数据库迁移（Alembic）
 

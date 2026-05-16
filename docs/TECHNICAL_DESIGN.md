@@ -1,7 +1,8 @@
 # Knowlix 项目技术设计文档
 
-> 版本：0.4（持久化固定为 PostgreSQL）  
-> 目标：以 **Python** 实现「知识 AI 问答 → 自动归纳整理 → 分类与同质合并 → 每日复盘」；**唯一核心**是知识归纳与分类能力；扩展能力（费曼自检、AI 纠错/打分等）与 UI（Streamlit / 未来 Web/App）通过边界与端口隔离，确保 **核心域代码不因前端形态变化而改动**。
+> 版本：0.6（核心域：**词汇/词组知识图谱 + 子图学习集 + 检验闭环 + 录入相似合并**）  
+> 目标：以 **Python** 实现「总知识图谱维护 → 为单次学习随机抽取规模可控子图（约 10～20 节点）→ 双模式检验更新掌握状态 → 录入时高相似项合并并累计频次以区分重点」；**唯一核心**是图谱与学习检验域；语音、出题模板、具体图算法与 UI 形态通过 **端口与适配器** 隔离，保证 **领域层不因 ASR/前端/模型厂商变化而大面积改动**。  
+> 持久化：**双存储** — **Neo4j** 承载词汇总图谱（节点/边/频次）；**PostgreSQL** 承载掌握状态、会话快照、合并审计、向量与既有关系表（Alembic 迁移）。
 
 ---
 
@@ -11,29 +12,28 @@
 
 | 能力 | 说明 |
 |------|------|
-| **问题捕获** | 用户当下遇到的问题以结构化形式进入系统（原文、上下文、标签草稿等）。 |
-| **AI 辅助问答** | 可选：生成初版解答或要点，作为归纳输入（解答可持久化，但产品上可「弱化」为辅助）。 |
-| **自动归纳** | 将散点记录整理为「知识点」实体（标题、摘要、要点、引用来源问题）。 |
-| **分类体系** | 支持多级分类 / 主题；可由规则、LLM、或混合策略打标；**分类逻辑在应用层可替换**。 |
-| **同质问题合并** | 相似问合并到同一知识点或同一「问题簇」；支持人工确认与撤销。 |
-| **每日复盘** | 按日汇总：新增知识点、分类变动、合并记录、待处理队列；可导出 Markdown/JSON。 |
+| **总知识图谱** | 全库 **单词、词组** 为节点；边表示可学习关系（搭配、上下位、共现、翻译对等，类型可配置）；作为权威数据源演进。 |
+| **子知识图谱（最小学习集）** | 从总图中按策略采样 **10～20** 个节点（可配置上下界）及其诱导子边（或扩展一跳邻居的策略二选一并文档化），解决「词量过大、全图不可学」问题。 |
+| **检验模式一：用户造句** | 键盘与/或 **语音** 输入句子；系统判定是否覆盖目标词/词组；通过后更新 **掌握**，并从当前待练集合中移除（语义上「从库里移除已掌握」优先用 **状态过滤** 实现，避免物理删除丢失审计）。 |
+| **检验模式二：系统出题** | 基于 **当前子图** 定制题目（选择/填空/连线等至少一种 MVP）；作答后更新掌握；已掌握项在 UI **划掉** 且后续出题降权或排除。 |
+| **录入与相似合并** | 新录入与已有节点 **相似度高则合并** 到规范节点；维护 **出现/合并次数** 供排序、子图采样加权与「重点」展示。 |
 
 ### 1.2 扩展能力（非核心、插件化）
 
-- 知识点下 **隐藏标准答案**，用户用费曼法自述，系统录音/文本提交。  
-- **AI 纠错、相似度打分、优化建议**（对比「标准要点」或 RAG 证据）。  
+- **SRS / 间隔复习**、多端同步、开放 API、图谱可视化高级布局。  
+- **人工拆分误合并**、批量导入、多租户。  
 
-以上扩展通过 **独立的应用服务 + 端口** 接入，**不侵入**「归纳、分类、合并、复盘」的领域不变量。
+以上通过 **独立用例或应用服务** 接入，**不侵入**「图谱不变量、子图生成契约、掌握状态机」的核心聚合规则。
 
 ---
 
 ## 2. 架构原则
 
-1. **有界上下文（Bounded Context）**：每个上下文有明确语言与职责，跨上下文通过 **应用服务编排** 或 **领域事件** 通信，避免「一个大类搞定一切」。  
-2. **依赖倒置**：核心域 **不依赖** Streamlit、HTTP、具体 LLM SDK、具体数据库驱动；只依赖 **端口（Protocol / ABC）**。  
-3. **用例驱动**：`application/use_cases/` 中每个用例对应一条用户旅程（如「收录问题 → 触发归纳」），领域逻辑在 `domain/`。  
-4. **可替换基础设施**：`infrastructure/` 实现仓储，AI 客户端，向量库等；换 Web/API 只新增 `interfaces/` 下的适配器。  
-5. **事件与异步（可选演进）**：归类、合并、日报生成可发域事件，便于未来 Worker、移动端推送订阅同一流水线。
+1. **有界上下文**：`LexiconGraph`（总图）、`LearningSession`（子图 + 会话）、`Verification`（检验与掌握）、`Ingestion`（录入与合并）职责清晰；跨上下文通过 **应用服务编排** 或 **领域事件**。  
+2. **依赖倒置**：`domain/` **不依赖** Streamlit、HTTP、具体 ASR、具体 LLM SDK；只依赖 **`application/ports/` 中的 Protocol**。  
+3. **用例驱动**：`application/use_cases/` 一用例一用户旅程（如 `BuildLearningSubgraph`、`SubmitUserSentence`、`GenerateSubgraphQuiz`）。  
+4. **可替换基础设施**：`infrastructure/` 实现仓储、嵌入、ASR、出题 LLM；换 Web/API 只增 `interfaces/`。  
+5. **子图与出题可版本化**：子图生成策略版本、出题模板版本写入元数据，便于回放与 A/B。
 
 ---
 
@@ -41,32 +41,32 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│  Knowledge Ingestion & Q&A（摄入与问答）                          │
-│  - 原始问题、会话、可选 AI 草稿答案                                │
+│  LexiconGraph（总词汇知识图谱）                                    │
+│  - LexemeNode（单词/词组）、LexemeEdge、规范形、别名               │
 └────────────────────────────┬────────────────────────────────────┘
                              │
 ┌────────────────────────────▼────────────────────────────────────┐
-│  Knowledge Organization（知识归纳）★ 核心                         │
-│  - RawRecord → KnowledgeItem；聚类；与分类、合并策略协作           │
+│  Ingestion & Dedup（录入与合并）                                  │
+│  - 归一化 → 相似检索 → 合并或新建 → occurrence_count 递增         │
+└────────────────────────────┬────────────────────────────────────┘
+                             │
+┌────────────────────────────▼────────────────────────────────────┐
+│  LearningSession（学习会话 / 子图）★ 与采样强相关                  │
+│  - BuildLearningSubgraph：随机/加权/连通子图；节点数 10～20        │
 └────────────────────────────┬────────────────────────────────────┘
                              │
         ┌────────────────────┼────────────────────┐
         ▼                    ▼                    ▼
 ┌───────────────┐   ┌─────────────────┐   ┌──────────────────────┐
-│ Taxonomy      │   │ Deduplication   │   │ Daily Review          │
-│ 分类与打标     │   │ 同质合并         │   │ 日终汇总与报告         │
+│ Verification  │   │ QuizGeneration  │   │ MasteryProjection   │
+│ 造句判定        │   │ 子图驱动出题      │   │ 掌握状态与用户视图    │
 └───────────────┘   └─────────────────┘   └──────────────────────┘
-
-┌─────────────────────────────────────────────────────────────────┐
-│  Feynman & Tutor（费曼 / 辅导）— 扩展上下文                         │
-│  - 隐答案、用户阐述、AI 评分与建议 — 只依赖 KnowledgeItem 的只读视图   │
-└─────────────────────────────────────────────────────────────────┘
 ```
 
 **边界规则**：  
-- 「归纳」上下文 **拥有** `KnowledgeItem` 的生命周期与不变量。  
-- 「分类」「合并」「复盘」可协作与订阅事件，但 **不反向修改** 彼此内部聚合根（通过明确命令/用例更新）。  
-- 「费曼」仅消费 **稳定的查询 DTO**（如 `KnowledgeItemSummary`），避免与归纳聚合写模型耦合。
+- **总图** 拥有 `LexemeNode` / `LexemeEdge` 的生命周期与引用完整性。  
+- **掌握状态** 建议建模为 **用户 × 规范节点** 的投影（或独立聚合），检验上下文 **可写** 掌握，读模型供子图采样「排除已掌握」。  
+- **子图** 是会话级或快照级 DTO，不反向污染总图结构（除非显式「写回」用例，如用户编辑边）。
 
 ---
 
@@ -77,31 +77,29 @@ knowlix/
 ├── pyproject.toml
 ├── src/
 │   └── knowlix/
-│       ├── domain/                    # 纯领域：实体、值对象、领域服务、不变量
-│       │   ├── organization/          # 核心：KnowledgeItem, MergeCandidate, ...
-│       │   ├── taxonomy/
-│       │   ├── ingestion/
-│       │   ├── review/
-│       │   └── feynman/               # 扩展域（可选包，或后续独立模块）
-│       ├── application/               # 用例、事务边界、编排
-│       │   ├── ports/                 # Protocol：LLM, VectorSearch, Clock, IdGenerator
+│       ├── domain/
+│       │   ├── lexicon_graph/         # LexemeNode, LexemeEdge, 不变量
+│       │   ├── learning_session/      # LearningSubgraph 值对象/实体
+│       │   ├── verification/          # 掌握枚举、造句判定规则（纯逻辑部分）
+│       │   └── ingestion/             # 合并决策值对象（若与图紧耦合可放 graph）
+│       ├── application/
+│       │   ├── ports/
 │       │   └── use_cases/
-│       ├── infrastructure/            # 适配器实现
-│       │   ├── persistence/           # PostgreSQL + Repository
-│       │   ├── ai/                      # OpenAI/本地模型等
-│       │   └── jobs/                  # 定时日报、批处理
-│       └── interfaces/                # 交付形态（薄层）
-│           └── streamlit/             # 页面仅调用 application
-│           # 未来: interfaces/api/ (FastAPI)、interfaces/mobile_gateway/
+│       ├── infrastructure/
+│       │   ├── persistence/           # PostgreSQL：掌握、审计、向量等
+│       │   ├── graph/
+│       │   │   └── neo4j/             # LexiconGraphPort 实现
+│       │   ├── ai/                    # 嵌入、LLM 出题、造句裁判
+│       │   └── speech/                # ASR 适配器
+│       └── interfaces/
+│           └── streamlit/
 ├── tests/
-│   ├── domain/
-│   ├── application/
-│   └── integration/
 └── docs/
-    └── TECHNICAL_DESIGN.md
+    ├── TECHNICAL_DESIGN.md
+    └── REQUIREMENTS.md
 ```
 
-**规则**：`interfaces/streamlit/` **禁止** 直接 import `infrastructure`；一律通过 **facade 用例** 或 **DI 容器** 注入 `application` 服务。
+**规则**：`interfaces/streamlit/` **禁止** 直接 `import infrastructure`；经 **facade 用例** 或组装根注入。
 
 ---
 
@@ -109,257 +107,229 @@ knowlix/
 
 ### 5.1 聚合与实体
 
-- **`RawQuestion`（或 `Capture`）**：用户原始输入；状态：`pending` → `organized` / `discarded`。  
-- **`KnowledgeItem`（核心聚合根）**：归纳后的知识点；含 `canonical_title`、`summary_bullets`、`evidence_refs`（指向原始问题 ID）、`taxonomy_node_id`、`merge_group_id`、`visibility_flags`（如是否对扩展模块展示标准答案）。  
-- **`TaxonomyNode`**：树或 DAG；`KnowledgeItem` 可挂载多个 tag（值对象）或由节点拥有（二选一并写清不变量）。  
-- **`MergeDecision`**：候选对、相似度分数、来源算法版本、人工确认记录。  
-- **`DailyReviewSnapshot`**：某日的不可变快照（便于审计与回放）。
+- **`LexemeNode`**：`id`、`kind`（word | phrase）、`canonical_text`、可选 `phonetic`/`gloss_short`、`occurrence_count`（合并与重复命中累计）、`created_at`/`updated_at`。  
+- **`LexemeAlias`**（可选）：合并前的 surface form → 指向规范 `node_id`，支持检索与审计。  
+- **`LexemeEdge`**：`src_id`、`dst_id`、`relation_type`、权重、元数据；删除节点时级联策略在仓储层与域规则中统一。  
+- **`UserMastery`**（或 `MasteryRecord`）：`user_id`、`lexeme_node_id`、`state`（unknown | learning | mastered）、`last_verified_at`、`last_mode`（sentence | quiz）。  
+- **`LearningSubgraphSnapshot`**（可选持久化）：`snapshot_id`、`node_ids[]`、`edge_ids[]`、`policy_version`、`rng_seed`、生成时间。  
+- **`MergeAudit`**：候选对、相似度、算法版本、人工确认（P1）。
 
 ### 5.2 关键领域服务（无状态、可单测）
 
-- **`OrganizationService`**：Raw → KnowledgeItem 的转换规则（可调用 **端口** `SummarizerPort`，实现不在域内）。  
-- **`SimilarityClusteringPolicy`**：抽象接口 + 多种实现（向量、LLM 判同、规则）；**同质合并**策略可插拔。  
-- **`ClassificationPolicy`**：打标管道（多级分类、置信度、待人工审核队列）。
+- **`CanonicalNormalizer`**：大小写、空白、全半角、可选词形归一（与产品规则一致）。  
+- **`SentenceCoverageChecker`**：判定句子是否覆盖目标词/词组（**精确子串** / **分词后匹配** / **经端口 LLM 裁判** 三选一或组合；**默认 MVP**：归一化后子串 + 简单词边界规则，复杂形态走端口）。  
+- **`SubgraphSampler`**：输入总图视图 + 约束（节点数上下界、排除已掌握、加权 key=`occurrence_count`），输出节点集与边集；**随机性** 通过注入 `RngPort` 或显式 seed 便于测试。
 
 ---
 
-## 6. 端口（Ports）设计 — 保证核心可扩展
-
-在 `application/ports/` 中定义 **Protocol**，示例：
+## 6. 端口（Ports）设计
 
 | 端口 | 职责 |
 |------|------|
-| `SummarizerPort` | 将多条 Raw 或对话历史压缩为知识点草案。 |
-| `QuestionAnswerPort` | 可选：独立问答，输出带引用结构的答案。 |
-| `EmbeddingPort` / `VectorStorePort` | 语义检索与聚类。 |
-| `TaxonomySuggestPort` | 建议分类路径（返回候选 + 分数）。 |
-| `MergeJudgePort` | LLM/规则判定是否同质（返回结构化结果）。 |
-| `UnitOfWorkPort` | 事务与仓储网关（领域不直接写 SQL）。 |
+| `EmbeddingPort` / `LexemeSimilarityPort` | 录入时 Top-K 相似节点分数；可 Fake 为编辑距离 + 哈希。 |
+| `MergeJudgePort`（可选） | 高于阈值时 LLM/规则二次确认是否合并。 |
+| `TranscriptionPort` | 语音 → 文本；领域只接收「转写文本 + 置信度 + 语言」。 |
+| `SentenceJudgePort`（可选） | 造句是否合格、是否覆盖目标、语法轻量提示（**不**替代覆盖检查的硬规则时可关）。 |
+| `QuizGeneratorPort` | 输入子图 DTO，输出结构化题目列表（类型、题干、选项、标答、关联 `lexeme_id`）。 |
+| **`LexiconGraphPort`** | 词汇总图 CRUD、随机采样、诱导子图、前缀检索（**Neo4j 实现**）。 |
+| `MasteryRepositoryPort` / `UnitOfWorkPort` | 掌握状态与关系型事务（**PostgreSQL**）。 |
 
-**新增 Web/API**：实现相同端口或复用 `infrastructure` 实现，**零改动** `domain` 与用例签名（最多增加「鉴权上下文」值对象传入用例）。
+**新增 Web/API**：复用相同端口，核心域零改或仅增加 `UserContext` 值对象。
 
 ---
 
 ## 7. 核心用例（应用层）
 
-1. **`CaptureProblem`**：保存原始问题，可选触发异步归纳。  
-2. **`OrganizeIntoKnowledge`**：生成/更新 `KnowledgeItem`，写入证据链。  
-3. **`AssignOrSuggestTaxonomy`**：自动+人工校正分类。  
-4. **`ProposeMerges` / `AcceptMerge` / `RejectMerge`**：同质候选与同态合并。  
-5. **`BuildDailyReview`**：生成当日 `DailyReviewSnapshot` 与可读报告。  
-
-**扩展用例（独立模块）**：  
-6. **`SubmitFeynmanNarration` / `ScoreNarration`**：读 `KnowledgeItem`，写辅导子域聚合。
+1. **`IngestLexeme`**：归一化 → 相似检索 → 合并递增 `occurrence_count` 或新建节点（可选边建议）。  
+2. **`BuildLearningSubgraph`**：生成 10～20 节点的子图 DTO。  
+3. **`SubmitUserSentence`**：绑定当前子图目标集合；转写（若语音）→ 覆盖检查 → 更新掌握与待练列表。  
+4. **`GenerateSubgraphQuiz` / `SubmitQuizAnswers`**：出题 → 判分 → 更新掌握。  
+5. **`RunLearningSession`**（编排）：生成子图 → 循环检验 → 可选刷新子图。  
+6. **`ListOrSearchLexicon`**、`**MaintainEdges**`：维护总图（P0 可简化 UI）。
 
 ---
 
-## 8. Streamlit 前端角色
+## 8. 界面层角色（Streamlit / 未来 Web）
 
-- **仅做**：表单、列表、可视化时间线、复盘页展示；会话状态与 `st.cache_resource` 包装的 **应用服务入口**。  
-- **不做**：分类算法、合并判定、数据库 SQL、直接调用第三方 LLM。  
-- **分页与后台任务**：长耗时归纳/聚类可 `st.status` + 线程/队列，或后台 `jobs`（后续与 Web 共用）。
+- **薄适配器**：表单、子图列表/简图、造句框、语音按钮（调用 `TranscriptionPort`）、出题与划掉展示。  
+- **不做**：相似度算法细节、SQL、直接调用第三方 SDK。  
+- **会话状态**：当前 `LearningSubgraph` 与待练节点列表放在 `st.session_state` 或后端会话存储（未来 API）。
 
 ---
 
 ## 9. 技术选型与可替换方案
 
-本节给出 **MVP 默认推荐** 与 **可替换项**，选型原则：**仅落入 `infrastructure` 与 `interfaces`**，`domain` / `application` 保持与具体厂商无关。
+选型原则：**具体厂商与算法实现仅落在 `infrastructure` 与 `interfaces`**；`domain` / `application` 保持与实现无关。
 
 ### 9.1 语言、运行时与工程化
 
 | 类别 | MVP 推荐 | 替代 / 备注 |
 |------|-----------|-------------|
-| Python | **3.10.6**（类型提示与性能） |  |
-| 依赖与虚拟环境 | **uv**（锁文件 + 极速安装）或 **Poetry** | `pip-tools` + `requirements.in` 亦够轻量 |
-| 打包布局 | **`src/` 布局** + `pyproject.toml` | 避免隐式 `PYTHONPATH` 污染 |
-| 代码质量 | **Ruff**（lint + format）+ **mypy**（严格模式分阶段打开） | BasedPyright 可作类型检查备选 |
-| 测试 | **pytest** + **pytest-cov**；契约用 **schemathesis**（将来 API） | **Hypothesis** 用于分类/合并策略属性测试 |
+| Python | **3.10+** | |
+| 依赖管理 | **uv** 或 **Poetry** | `pip-tools` |
+| 布局 | **`src/`** + `pyproject.toml` | |
+| 代码质量 | **Ruff** + **mypy**（严格模式分阶段） | BasedPyright |
+| 测试 | **pytest** + **pytest-cov** | **Hypothesis** 测采样与状态机 |
 
-### 9.2 界面层（当前优先 Streamlit）
-
-| 类别 | MVP 推荐 | 替代 / 备注 |
-|------|-----------|-------------|
-| 桌面/本地 Web UI | **Streamlit** | **Gradio** 适合极简 Demo；复杂交互可迁 **NiceGUI** |
-| 会话与配置 | `st.session_state` + **Pydantic Settings** 读环境变量 | 敏感键不落仓库；`.env` 仅本地 |
-| 组件增强 | **streamlit-extras**、原生 `st.data_editor` | 图表 **Plotly** / **Altair** 二选一即可 |
-| 未来纯 Web | **FastAPI** + 任意 SPA（React / Vue）仅作 `interfaces` | **HTMX + Jinja2** 可作轻量后台管理 |
-
-### 9.3 将来 API 与认证（核心外）
+### 9.2 界面层
 
 | 类别 | MVP 推荐 | 替代 / 备注 |
 |------|-----------|-------------|
-| HTTP API | **FastAPI** | Starlette 裸用；体量极大时再拆 BFF |
-| 模式与校验 | **Pydantic v2** | OpenAPI 由 FastAPI 自动生成 |
-| 认证/会话 | 视产品：**JWT**（`python-jose` / Authlib）或 **Session + HTTP-only Cookie** | 商业 ID：**Clerk**、**Auth0** 仅挂在 API 适配器 |
-| 文件上传（费曼音频） | **python-multipart** + 对象存储适配器 | 本地 MVP：限制大小 + 防路径穿越 |
+| 本地/内网 Demo UI | **Streamlit** | **Gradio** 极简原型；复杂交互 **NiceGUI** / 纯 **FastAPI + HTMX** |
+| 配置 | **pydantic-settings** + 环境变量 | 密钥不入库不入域 |
+| 图可视化（子图） | **Pyvis**（导出 HTML）或 **streamlit-agraph** | 大规模仅服务端生成静态图；前端重交互迁 SPA + **Cytoscape.js** / **D3** |
+| 未来 Web | **FastAPI** + React/Vue | BFF 按需 |
 
-### 9.4 持久化与迁移
+### 9.3 持久化：双存储（Neo4j + PostgreSQL）
 
-| 类别 | MVP 推荐 | 替代 / 备注 |
-|------|-----------|-------------|
-| 关系库 | **PostgreSQL**（唯一选项；开发与生产同一引擎，避免方言差异） | 本地/MVP 用 **Docker Compose** 或单容器 Postgres 即可 |
-| ORM | **SQLAlchemy 2.0**（Core + ORM 分明） | 喜模型合一：**SQLModel**（仍基于 SQLAlchemy） |
-| 迁移 | **Alembic**（自首批表起纳入工作流） | 与 CI 对齐：`upgrade heads` 作为部署前置检查 |
-| 全文检索（可选） | **pg_trgm** + GIN（模糊/相似）；或 **tsvector**（分词需按语言调参） | 检索极重时再评估 **Elastic/OpenSearch** |
-| JSON 字段 | **JSONB**（PostgreSQL）+ SQLAlchemy 映射 | 大块 blob 单独表或大对象存储，避免聚合根行过宽 |
+| 数据域 | 存储 | 说明 |
+|--------|------|------|
+| **词汇节点、边、occurrence_count** | **Neo4j** | 总知识图谱权威源；Cypher 做采样、诱导子图、k-hop 扩展 |
+| **用户掌握、子图快照、合并审计、嵌入向量** | **PostgreSQL** | 关系型事务、Alembic 迁移、pgvector |
+| **录入规则相似（前缀/编辑距离）** | Neo4j 前缀索引 + 应用层 **RapidFuzz** | 语义相似仍走 pgvector + `EmbeddingPort` |
 
-### 9.5 向量与语义合并 / 检索
+| 类别 | 推荐 | 替代 / 备注 |
+|------|------|-------------|
+| 图数据库 | **Neo4j 5 Community** + 官方 **`neo4j` Python Driver** | **Memgraph**、**Neptune** 需另写 `LexiconGraphPort` 适配器 |
+| 图模型 | 标签 **`Lexeme`**；关系 **`RELATES`**（属性 `relation_type`、`weight`） | 关系类型增多时可拆为多 rel type |
+| Schema | 启动时 **`ensure_schema()`** 幂等约束（`id` UNIQUE、canonical 索引） | 可选 `scripts/neo4j_schema.cypher` 手工执行 |
+| 连接配置 | `NEO4J_URI`（`bolt://`）、`NEO4J_USER`、`NEO4J_PASSWORD` | 本地 **`docker compose up neo4j`**；默认库无需配置 |
+| 关系库 | **PostgreSQL** + **SQLAlchemy 2.0** | |
+| 关系库迁移 | **Alembic** | 不含 Neo4j 图结构（图结构由 Neo4j 约束管理） |
+| 模糊查重（PG 侧） | **pg_trgm** | 与 Neo4j 前缀检索互补 |
+| JSON 元数据 | **JSONB**（PG） | 题目快照、子图策略参数 |
 
-| 类别 | MVP 推荐 | 替代 / 备注 |
-|------|-----------|-------------|
-| 向量存储 | **pgvector**（与业务库同 Postgres，事务与备份策略一致） | 规模大或要独立扩缩：**Qdrant**、**Milvus**；本地轻量实验可 **Chroma**（不走主库） |
-| 向量索引 | 候选对少时可 **暴力余弦**；上万条再上 **HNSW**（由向量库提供） | **FAISS** 适合纯本地离线索引 |
-| Embedding 模型 | 云端 API（OpenAI 等）经 `EmbeddingPort` | 离线：**sentence-transformers**；多语言看 **BGE-M3** 等 |
+**结论（图存储）**：**Neo4j 为词汇图谱主库**；`LexiconGraphPort` 由 `Neo4jLexiconGraphRepository` 实现；子图采样优先 **Cypher + 应用层加权/随机种子**，不再以 NetworkX 全量拉取为主路径。掌握状态与子图会话元数据 **不写入 Neo4j 节点**（避免图库承担用户维度膨胀），经 PG 关联 `lexeme_id`。
 
-### 9.6 大模型接入与结构化输出
-
-| 类别 | MVP 推荐 | 替代 / 备注 |
-|------|-----------|-------------|
-| 云 API | 官方 SDK（**openai**、**anthropic**）经统一 **薄封装** | **LiteLLM**：多供应商路由、fallback、计费统计 |
-| 结构化 JSON | **Pydantic + Instructor** 或 **OpenAI JSON Schema / tool** | 避免把 **LangChain** 链塞进 `domain`；若用，仅限 `infrastructure` 流水线胶水 |
-| 本地 / 私有部署 | **Ollama**、**vLLM**、**llama.cpp** | 与云端同一 `QuestionAnswerPort` 多实现 |
-| 提示管理 | 仓库内 **版本化模板**（Jinja2 或纯字符串）+ 元数据表记 `prompt_version` | 远程拉取：后期接配置中心 |
-
-### 9.7 异步任务、调度与消息
+### 9.4 向量、相似合并与重点权重
 
 | 类别 | MVP 推荐 | 替代 / 备注 |
 |------|-----------|-------------|
-| MVP 后台 | **线程池** + 队列（`queue.Queue`）或 Streamlit 外挂 **APScheduler** | 足够支撑单机日报与批归纳 |
-| 可扩展队列 | **Celery + Redis** | 轻量：**RQ**、**Arq**（async） |
-| 事件总线（后期） | 进程内 **事件列表** 或 **Redis Pub/Sub** | 多服务：**Kafka**（通常过重） |
+| 向量存 | **pgvector**（与业务同事务） | **Qdrant** / **Milvus** 独立扩缩 |
+| 索引 | 数据量小 **暴力检索**；上万 **HNSW** | |
+| 嵌入模型 | 云 API 经 `EmbeddingPort` | 离线 **sentence-transformers**；多语言 **BGE-M3** 等 |
+| 纯规则兜底 | **RapidFuzz** / **python-Levenshtein** | 无向量时仍可合并极高相似短词 |
 
-### 9.8 可观测性、日志与安全
-
-| 类别 | MVP 推荐 | 替代 / 备注 |
-|------|-----------|-------------|
-| 日志 | **structlog**（JSON 友好）或标准 `logging` + 格式化 | 敏感字段脱敏在 infrastructure |
-| 指标（后期） | **OpenTelemetry** + Prometheus exporter | MVP 可先打点时间戳 |
-| 配置密钥 | **pydantic-settings**；密钥来自环境变量或密钥管理 | 禁止把 API Key 写进领域层 |
-
-### 9.9 文档导出与模板
+### 9.5 大模型与结构化出题 / 裁判
 
 | 类别 | MVP 推荐 | 替代 / 备注 |
 |------|-----------|-------------|
-| 每日复盘 Markdown | **Jinja2** 模板 + `BuildDailyReview` DTO | **markupsafe** 防注入；PDF 后期 **WeasyPrint** / pandoc |
+| 云 API | 官方 SDK 薄封装 | **LiteLLM** 多路由 |
+| 结构化输出 | **Pydantic** + **Instructor** 或 JSON Schema tool | 出题与裁判共用模式 |
+| 本地 | **Ollama** / **vLLM** | 与云端同一端口多实现 |
+| 提示 | 仓库内版本化模板 + `prompt_version` 字段 | |
 
-### 9.10 容器与部署（可选）
+**注意**：`QuizGeneratorPort` 的默认实现可为 **模板化非 LLM 题目**（如从边生成连线题），LLM 为增强项，避免 MVP 强依赖模型可用性。
 
-| 类别 | MVP 推荐 | 替代 / 备注 |
-|------|-----------|-------------|
-| 容器 | **Docker** 单阶段 + 多阶段构建减镜像 | **docker compose** 编排 Streamlit + **PostgreSQL**（必选；镜像或启动脚本启用 **pgvector**）+ 可选 **Qdrant**（专用向量库扩缩） |
-| 逆向代理 | **Caddy** 或 **Nginx** 终止 TLS | Streamlit 内置不适合直接公网暴露 |
-
-### 9.11 依赖注入与组装根（Composition Root）
-
-| 类别 | MVP/DIY 推荐 | 替代 / 备注 |
-|------|-------------|-------------|
-| 组装方式 | **`interfaces/streamlit/app.py`（或 `main.py`）手工 `new` 仓储 + 注入用例** | 简单、显式、易调试 |
-| DI 容器 | 体量变大再引入 **dependency-injector** 或 **lagom** | 避免核心层依赖任何容器 API |
-| 生命周期 | Streamlit：`@st.cache_resource` 包住「进程级单例」（DB 引擎、LLM 客户端） | 与 Web Worker 模型不同，拆环境时重写 interfaces 即可 |
-
-### 9.12 序列化、API 交换格式与缓存
+### 9.6 语音输入（造句模式）
 
 | 类别 | MVP 推荐 | 替代 / 备注 |
 |------|-----------|-------------|
-| JSON（高性能） | **orjson** 或 **msgspec**（将来 FastAPI 响应模型仍可 Pydantic，序列化层切换） | 标准库 `json` 够用则不必提前引入 |
-| 导出/备份 | **JSON Lines**（`.jsonl`）流式写出日报或批量导出 | 大块附件用文件路径引用，不嵌 base64 |
-| 缓存（可选） | **diskcache** / **Redis**（多实例时再） | 仅限 infrastructure；缓存键含 `prompt_version`、模型名 |
+| 浏览器录音 | Streamlit **自定义组件** 或 **先文件上传 wav/mp3**（实现成本最低） | |
+| 转写 | **OpenAI Whisper API** 或本地 **faster-whisper** | 国内云：**阿里云/讯飞** 等经 `TranscriptionPort` |
+| 格式 | **ffmpeg** CLI 或 **pydub** | 统一采样率再送 ASR |
 
-### 9.13 扩展：费曼口述与音频（仅基础设施）
-
-| 类别 | 可选方案 | 备注 |
-|------|-----------|------|
-| 语音转写 | **Whisper**（本地）、**Azure Speech**、**阿里云/讯飞** 等经 `TranscriptionPort` | 核心域只收「转写文本 + 元数据」 |
-| 音频处理 | **pydub**（格式转换）、浏览器端 **Web Audio**（可选） | 存储走对象存储适配器或限大小本地目录 |
-| 文本差分/高亮（UI） | **diff-match-patch**；展示仅在 interfaces | 与 `ScoreNarration` 输出无关 |
-
-### 9.14 RAG 与长文档切块（可选，不绑架核心）
-
-| 类别 | 推荐策略 | 替代 / 备注 |
-|------|-----------|-------------|
-| 定位 | **检索增强**只实现于 `infrastructure`，对领域暴露 `EvidenceRetrieverPort` 或扩展现有 `QuestionAnswerPort` | 核心仍是「归纳/分类/合并」，RAG 是答案质量插件 |
-| 切块 | 自研 **固定窗口 + 重叠** 或 **语义切块**（小库） | **LlamaIndex** 仅作 adapter 胶水；避免业务规则进 Index |
-| 重排序 | **cross-encoder**（cpu 小模型）作二阶段排序 | 经端口注入，便于单测 Fake |
-
-### 9.15 安全、隐私与合规（工程技术项）
+### 9.7 异步任务与调度
 
 | 类别 | MVP 推荐 | 替代 / 备注 |
 |------|-----------|-------------|
-| 静态敏感数据 | 字段级 **Fernet**（`cryptography`）或 DB 透明加密（部署层） | 密钥.rotation 策略放在运维文档，不在域内 |
-| 清洗与审计 | 导出日志 **脱敏**；删除请求走用例 `ForgetSubject`（若产品需要） | |
-| 依赖漏洞 | **pip-audit** / **uv audit** 进 CI | |
+| 后台 | **线程池** + `queue` 或 **APScheduler** | 批量重算嵌入 |
+| 扩展 | **Celery + Redis** | **Arq**（async） |
 
-### 9.16 CLI、脚本与开发者体验
+### 9.8 可观测性、安全
 
 | 类别 | MVP 推荐 | 替代 / 备注 |
 |------|-----------|-------------|
-| 运维/批处理 CLI | **Typer** + `knowlix.cli`（如重建索引、补跑日报） | **Click** 亦可 |
-| Git 钩子 | **pre-commit**（Ruff、mypy、检测大文件） | |
-| 任务启动 | **Makefile** 或 **just**（`justfile`）统一 `test`、`lint`、`run` | |
+| 日志 | **structlog**（JSON） | 敏感字段脱敏在 infrastructure |
+| 密钥 | **pydantic-settings** | |
+| 依赖审计 | **pip-audit** / **uv audit** | CI |
 
-### 9.17 与其它语言/运行时的边界（可选远期）
+### 9.9 容器与部署（可选）
 
-| 场景 | 做法 | 原因 |
+| 类别 | MVP 推荐 | 替代 / 备注 |
+|------|-----------|-------------|
+| 编排 | **docker compose**：**PostgreSQL** + **Neo4j** + App | 可选 **Qdrant** |
+| 反向代理 | **Caddy** / **Nginx** | TLS 终止 |
+
+### 9.10 依赖注入与组装根
+
+| 类别 | 推荐 | 备注 |
 |------|------|------|
-| 高性能向量检索服务 | 独立 **Qdrant/Milvus** 进程，HTTP/gRPC | Python 核心不变 |
-| 重 CPU 预处理 | 侧车 **Rust/Go** 微服务，经 HTTP 调用 | 仅当 profiling 证明瓶颈 |
-| 移动端 | **不**在核心引入 Kivy；App 走 **API + 原生/Flutter** | 保持核心纯 Python 库即可 |
+| MVP | `interfaces/streamlit/app.py` 手工组装 | 显式、易调试 |
+| 规模化 | **dependency-injector** / **lagom** | 核心不依赖容器 API |
 
-**选型结论**：MVP 以 **Streamlit + PostgreSQL + Alembic + 统一 LLM 端口** 闭环；语义向量优先 **pgvector**（同库），必要时再外挂专用向量库；任务队列仅在「后台任务与并发」触线时引入，**不改变核心用例与领域模型**。上表各「替代」列可在不触碰 `domain` 的前提下替换实现。
+### 9.11 序列化与导出
 
----
+| 类别 | 推荐 | 备注 |
+|------|------|------|
+| JSON | **orjson**（高性能） | 可选 |
+| 学习报告 | **Jinja2** → Markdown/HTML | |
 
-## 10. 数据与持久化
+### 9.12 与其它运行时边界
 
-- **唯一关系库**：**PostgreSQL**；ORM 采用 **SQLAlchemy 2.0** 或 **SQLModel**；仓储与连接池在 `infrastructure/persistence/`，连接串由环境变量注入。  
-- **向量**：默认落在 **pgvector** 扩展（与业务数据同事务或明确读写顺序）；若单机资源或检索规模不适用，再通过 **`VectorStorePort`** 换用 Qdrant 等，**迁移与双写策略仅在 infrastructure 层**。  
-- **日报**：快照落库（PostgreSQL）+ 模板渲染（Jinja2 / 纯 Python 字符串），导出与 Streamlit/Web 共用同一 `BuildDailyReview` 输出 DTO。
+| 场景 | 做法 |
+|------|------|
+| 重 CPU 嵌入批处理 | 独立 worker 进程，队列消费 |
+| 移动端 | API + 原生/Flutter；核心保持 Python 库 |
 
----
-
-## 11. AI 集成策略（与核心解耦）
-
-- **提示词与 schema**：集中在 `infrastructure/ai/prompts/`，版本号写入 `MergeDecision` / `KnowledgeItem` 元数据，便于回放与 A/B。  
-- **结构化输出**：分类、合并、归纳一律优先 **JSON schema / tool calling**，应用层校验后写入域。  
-- **降级**：LLM 不可用时，摄取仍成功，队列标记 `retry`，不破坏归纳流水线状态机。
+**选型小结**：MVP = **Streamlit + Neo4j（词汇图）+ PostgreSQL（掌握/审计/向量）+ Alembic + 端口化 ASR/LLM**；换图库仅替换 `infrastructure/graph/` 适配器。
 
 ---
 
-## 12. 后续 Web / App 接入方式
+## 10. 数据与持久化要点
 
-| 交付形态 | 建议 | 与核心的关系 |
-|----------|------|----------------|
-| **Web** | 新增 `interfaces/api`（如 FastAPI），路由处理器调用 **相同用例**；JWT/OAuth 在接口层。 | 核心包无变更。 |
-| **移动端** | App → API → 用例；或 GraphQL BFF；离线缓存由客户端处理。 | 核心包无变更。 |
-| **多租户（若需要）** | `TenantId` 作为值对象从接口层注入用例；仓储查询统一带租户。 | 领域规则可逐用例加强。 |
+### 10.1 Neo4j（词汇总图）
+
+- **节点** `(:Lexeme)` 属性：`id`（UUID 字符串）、`kind`、`canonical_text`、`occurrence_count`、`phonetic`、`gloss_short`、`created_at`、`updated_at`（`datetime`）。  
+- **边** `(a)-[:RELATES {id, relation_type, weight}]->(b)`；端点必须已存在。  
+- **约束**：`lexeme_id` UNIQUE；`canonical_text`、`kind` 索引。  
+- **查询模式**：`sample_lexemes` → `get_induced_subgraph` 支撑最小学习集；复杂 k-hop 可在仓储层扩展 Cypher。
+
+### 10.2 PostgreSQL（关系与掌握）
+
+- **用户掌握表**、**合并审计表**、**子图快照**（JSONB：节点 id 列表 + policy_version）、**嵌入向量**（pgvector）。  
+- 外键逻辑以 **`lexeme_id`（UUID）** 关联 Neo4j 节点，**不做跨库 FK**；一致性由用例层保证。  
+- **题目与作答日志**（可选）：便于分析错题与模型效果。
+
+---
+
+## 11. AI 集成策略
+
+- 嵌入、合并裁判、造句裁判、LLM 出题均走 **端口**；失败时 **降级**（如无 LLM 则仅用规则出题 / 子串覆盖）。  
+- 结构化输出一律 **Pydantic 校验** 后写入域。  
+- `prompt_version` / `model_name` 写入审计或快照元数据。
+
+---
+
+## 12. 后续 Web / App 接入
+
+| 交付形态 | 做法 |
+|----------|------|
+| HTTP API | `interfaces/api`（FastAPI）映射到与 Streamlit **相同用例** |
+| 多租户 | `TenantId` / `UserId` 从接口注入用例；查询统一带作用域 |
 
 ---
 
 ## 13. 非功能需求（摘要）
 
-- **可测试性**：领域单测不连网；集成测对 Fake 端口。  
-- **可观测性**：用例级结构化日志（`correlation_id`）、关键指标（归纳延迟、合并准确率人工反馈）。  
-- **隐私**：原始问题与阐述可加密字段或按环境配置脱敏；密钥仅在 infrastructure。  
-- **合规**：扩展「费曼录音」时注意本地存储与权限模型，与核心归纳表分离。
+- **可测试性**：采样、掌握状态机、覆盖检查可纯单测；集成测对 Fake 端口。  
+- **性能**：子图构建在万级边内应 **秒级**；全图扫描加索引（节点标签、掌握状态）。  
+- **隐私**：语音文件存储周期与脱敏策略在运维层定义；域内仅存转写文本与引用 id。
 
 ---
 
 ## 14. 实施里程碑（建议）
 
-1. **M0**：包结构 + `KnowledgeItem` / `RawQuestion` + **PostgreSQL** 仓储 + Alembic 基线 + `CaptureProblem`。  
-2. **M1**：`OrganizeIntoKnowledge` + `SummarizerPort` Fake/真实实现 + Streamlit 最小流程。  
-3. **M2**：`Taxonomy` + `ProposeMerges` + 人工审核 UI。  
-4. **M3**：`BuildDailyReview` + 导出。  
-5. **M4（扩展）**：`interfaces/api` + Feynman 子域 + 评分端口。
+1. **M0**：Neo4j `LexiconGraphPort` + PG 掌握表迁移 + `IngestLexeme`（无向量可先 RapidFuzz）+ Streamlit 录入页。  
+2. **M1**：`BuildLearningSubgraph`（Neo4j 采样 + 诱导子图）+ 子图展示 + 掌握表。  
+3. **M2**：`GenerateSubgraphQuiz` / `SubmitQuizAnswers` + 划掉 UI。  
+4. **M3**：`SubmitUserSentence` + 可选 `TranscriptionPort`。  
+5. **M4**：pgvector 嵌入合并 + 人工拆分误合并（P1）+ API。
 
 ---
 
 ## 15. 小结
 
-- **核心**锚定在 **Knowledge Organization** 有界上下文：归纳、分类、同质合并、每日复盘。  
-- **Streamlit** 是 **薄适配器**；**Web/App** 通过 **相同的应用用例与端口** 接入，无需修改核心领域与用例实现。  
-- **同质合并与分类** 以 **策略 + 端口** 注入，保证算法与模型迭代时上层流程稳定。  
-- **技术选型** 以第 9 章为清单：新增栈时优先对照「落入哪一层」，避免泄漏进核心域。  
-- **关系型与事务型持久化** 仅 **PostgreSQL**（开发/生产同一引擎）；向量检索以 **pgvector** 为默认，必要时经端口切换外挂库，不改变领域模型。
-
-本文档作为后续 `README`、API 契约与数据库迁移的父文档，随实现迭代版本号与「上下文地图」。
+- **核心**锚定在 **词汇知识图谱 + 子图学习集 + 双模式检验 + 录入合并与频次**。  
+- **技术选型** 以第 9 章为准：词汇图 **Neo4j**；掌握与向量 **PostgreSQL**；语音与出题 **端口化**；避免把 Neo4j Driver 渗入 `domain`。  
+- 本文档与 [REQUIREMENTS.md](./REQUIREMENTS.md) 同步迭代版本号与术语表。
